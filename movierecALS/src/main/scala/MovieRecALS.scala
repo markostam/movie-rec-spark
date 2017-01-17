@@ -36,8 +36,8 @@ object MovieRecALS {
 
     // load personal ratings
 
-    //val myRatings = loadRatings(args(1))
-    //val myRatingsRDD = sc.parallelize(myRatings, 1)
+    //val testRatings = loadRatings(args(1))
+    //val testRatingsRDD = sc.parallelize(myRatings, 1)
 
     val dataDir = args(0)
 
@@ -59,7 +59,7 @@ object MovieRecALS {
     val numPartitions = math.round(numRatings/2500000).toInt
     val training = ratings.filter(x => x._1 < 6).
       values.
-      //union(myRatingsRDD).
+      //union(testRatingsRDD).
       repartition(numPartitions).
       cache()
     val validation = ratings.filter(x => x._1 >= 6 && x._1 < 8).
@@ -76,7 +76,7 @@ object MovieRecALS {
       + numValidation + ", test: " + numTest)
 
     def computeRmse(model: MatrixFactorizationModel,
-                    ratesAndPreds: RDD[((Int, Int), (Double, Double))]) = {
+                    ratesAndPreds: RDD[((Int, Int), (Double, Double))]) : Double = {
       val MSE = ratesAndPreds.map { case ((user, product), (r1, r2)) =>
         val err = (r1 - r2)
         err * err
@@ -86,33 +86,57 @@ object MovieRecALS {
 
     // define hyperparameter search space
     val ranks = List(3, 10, 30, 100)
-    val lambdas = List(0.01, 0.1, 1.0, 10.0)
-    val numIters = List(10, 30, 100)
-    val bestValidationRmse = Long.MaxValue
+    val numIters = List(10, 30)
+    val lambdas = List(0.0001, 0.001, 0.01, 0.1)
+    var bestValidationRmse = Long.MaxValue
 
     // do hyperparameter search
-    for (rank <- ranks; lambda <- lambdas; numIter <- numIters) {
-      val model = ALS.train(training, rank, numIter, lambda)
 
-      val usersProducts = validation.map { case Rating(user, product, rate) =>
-        (user, product) }
-      val predictions =
-        model.predict(usersProducts).map { case Rating(user, product, rate) =>
-          ((user, product), rate) }
-      val ratesAndPreds = validation.map { case Rating(user, product, rate) =>
-        ((user, product), rate) }.join(predictions)
+    //generate all possible combinations
+    val combos = ranks.flatMap(x => numIters.flatMap(y => lambdas.map(z => (x,y,z))))
 
-      val validationRmse = computeRmse(model, ratesAndPreds)
-      println("RMSE (validation) = " + validationRmse + " for the model trained with rank = "
-        + rank + ", lambda = " + lambda + ", and numIter = " + numIter + ".")
-      if (validationRmse < bestValidationRmse) {
-        println("New best RMSE: " + validationRmse)
-        val bestModel = Some(model)
-        val bestValidationRmse = validationRmse
-        val bestRank = rank
-        val bestLambda = lambda
-        val bestNumIter = numIter
+    def hyperParamSearch(combos: List[(Int,Int,Double)], training: RDD[Rating],
+                          validation: RDD[Rating], bestValidationRmse: Double = Double.MaxValue,
+                          returnList : List[(MatrixFactorizationModel, Double, Int, Double, Int)] = List()) :
+                          (MatrixFactorizationModel, Double, Int, Double, Int) = {
+
+      // private func to allow tail recursion and prevent stack overflows
+      @scala.annotation.tailrec
+      def hyperParamSearchf(combos: List[(Int, Int, Double)], training: RDD[Rating],
+                            validation: RDD[Rating], bestValidationRmse: Double,
+                            returnList: List[(MatrixFactorizationModel, Double, Int, Double, Int)]):
+      (MatrixFactorizationModel, Double, Int, Double, Int) = {
+
+        val (rank, numIter, lambda) = combos.head
+        val model = ALS.train(training, rank, numIter, lambda)
+
+        val usersProducts = validation.map { case Rating(user, product, rate) =>
+          (user, product)
+        }
+        val predictions =
+          model.predict(usersProducts).map { case Rating(user, product, rate) =>
+            ((user, product), rate)
+          }
+        val ratesAndPreds = validation.map { case Rating(user, product, rate) =>
+          ((user, product), rate)
+        }.join(predictions)
+        val validationRmse: Double = computeRmse(model, ratesAndPreds)
+
+        println("RMSE (validation) = " + validationRmse + " for the model trained with rank = "
+          + rank + ", lambda = " + lambda + ", and numIter = " + numIter + ".")
+
+        if (combos.tail.isEmpty) {
+          returnList.minBy(_._2)
+        }
+        else {
+          val updatedReturnList = (model, validationRmse, rank, lambda, numIter) :: returnList
+          hyperParamSearchf(combos.tail, training, validation, validationRmse, updatedReturnList)
+        }
       }
+      hyperParamSearchf(combos, training, validation, bestValidationRmse, returnList)
     }
+
+    val bestSettings = hyperParamSearch(combos, training, validation)
+
   }
 }
